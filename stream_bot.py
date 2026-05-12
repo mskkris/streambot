@@ -133,9 +133,20 @@ stream_bot = StreamBot()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    stream_bot.save_user(user)
+    stream_bot.save_user(user, selected_language='ru')
     try:
-        welcome_text_ru = (
+        # Планируем напоминания
+        msk = pytz.timezone('Europe/Moscow')
+        stream_dt = msk.localize(datetime(2026, 5, 13, 19, 0))
+        morning_dt = msk.localize(datetime(2026, 5, 13, 10, 0))
+        ten_min_dt = stream_dt - timedelta(minutes=10)
+        now = datetime.now(msk)
+        for run_time, task_type in [(morning_dt, 'reminder_morning'), (ten_min_dt, 'reminder_10min')]:
+            if run_time > now:
+                context.job_queue.run_once(send_reminder, when=run_time, data=(user.id, task_type))
+                logger.info(f"Запланировано {task_type} для {user.id} на {run_time}")
+
+        welcome_text = (
             "👋 Привет!\n\n"
             "Почему продакт в Google, стартапе на три человека и в Сбере — это три разные профессии?\n\n"
             "Разбираем завтра вместе на стриме с Инной, продактом в американской компании "
@@ -144,20 +155,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "🎯 Почему в одной компании ты мини-CEO, а в другой — секретарь разработки (и почему это ок)\n"
             "💡 Как тип бизнеса (B2B, B2C, SaaS) и стадия жизни компании определяют твой рабочий день\n"
             "🔥 Разбор кейсов: на реальных примерах покажем, как меняется функционал продакта при смене бизнес-задач\n\n"
-            "📅 Когда: завтра, 13 мая, в 19:00 по Москве / 18:00 CET\n\n"
+            "📅 Завтра, 13 мая, в 19:00 МСК / 18:00 CET\n\n"
             "Запись будет, регистрации нет — берите в охапку кота и чай и просто подключайтесь!\n\n"
             "📺 <b>Вебинар пройдёт в канале</b> t.me/productgames\n\n"
-            "Пожалуйста, выберите язык общения ниже:"
+            "⏰ Напомним утром и за 10 минут до старта."
         )
-        keyboard = [
-            [InlineKeyboardButton("🇷🇺 Русский", callback_data="set_lang_ru"),
-             InlineKeyboardButton("🇬🇧 English", callback_data="set_lang_en")]
-        ]
+        keyboard = [[InlineKeyboardButton("📺 Подписаться на канал", url="https://t.me/productgames")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(welcome_text_ru, parse_mode='HTML', reply_markup=reply_markup)
+        await update.message.reply_text(welcome_text, parse_mode='HTML', reply_markup=reply_markup)
+
+        # Вопрос об источнике
+        question = "И последний вопрос: откуда вы о нас узнали?"
+        options = [
+            [InlineKeyboardButton("LinkedIn Кристины Гусевой", callback_data="ref_linkedin_kris")],
+            [InlineKeyboardButton("LinkedIn Инны", callback_data="ref_linkedin_inna")],
+            [InlineKeyboardButton("Канал Product Games", callback_data="ref_channel")],
+            [InlineKeyboardButton("От знакомых", callback_data="ref_friends")],
+            [InlineKeyboardButton("Другое", callback_data="ref_other")]
+        ]
+        await context.bot.send_message(chat_id=user.id, text=question, reply_markup=InlineKeyboardMarkup(options))
+
     except Exception as e:
-        logger.error(f"Ошибка в admin_send_stream_link: {e}")
-        await update.message.reply_text("😕 Произошла ошибка при рассылке ссылок.")
+        logger.error(f"Ошибка в start: {e}")
+        await update.message.reply_text("😕 Произошла ошибка. Попробуйте позднее.")
 
 # Админские команды
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -729,104 +749,6 @@ async def handle_ref_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.error(f"Ошибка в handle_ref_text: {e}")
         await update.message.reply_text("😕 Произошла ошибка. Попробуйте позднее или обратитесь к @KriGuseva")
 
-async def set_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Устанавливает язык пользователя и информирует о том, что ссылка будет отправлена позже"""
-    query = update.callback_query
-    await query.answer()
-    user = update.effective_user
-    lang = 'ru' if query.data == 'set_lang_ru' else 'en'
-    stream_bot.save_user(user, selected_language=lang)
-
-    # --- Сохраняем задачи для напоминаний ---
-    # Дата и время стрима (исправленная версия)
-    msk = pytz.timezone('Europe/Moscow')
-    stream_dt = None
-    try:
-        # Получаем текущий год
-        current_year = datetime.now().year
-
-        # Парсим дату и время стрима
-        # Переводим русский месяц в английский для парсинга
-        months_ru_to_en = {
-            'января': 'January', 'февраля': 'February', 'марта': 'March',
-            'апреля': 'April', 'мая': 'May', 'июня': 'June',
-            'июля': 'July', 'августа': 'August', 'сентября': 'September',
-            'октября': 'October', 'ноября': 'November', 'декабря': 'December'
-        }
-
-        stream_date_en = STREAM_DATE
-        for ru_month, en_month in months_ru_to_en.items():
-            stream_date_en = stream_date_en.replace(ru_month, en_month)
-
-        # Парсим дату
-        stream_dt = datetime.strptime(f"{stream_date_en} {current_year} {STREAM_TIME}", "%d %B %Y %H:%M")
-        stream_dt = msk.localize(stream_dt)
-
-        # Если дата уже прошла в этом году, берем следующий год
-        if stream_dt < datetime.now(msk):
-            stream_dt = stream_dt.replace(year=current_year + 1)
-
-    except Exception as e:
-        logger.error(f"Ошибка парсинга даты стрима: {e}")
-        # Создаем тестовую дату через 1 час от текущего времени для отладки
-        stream_dt = datetime.now(msk) + timedelta(hours=1)
-        logger.info(f"Используем тестовую дату: {stream_dt}")
-
-    user_id = user.id
-    if stream_dt:
-        morning_dt = msk.localize(datetime(2026, 5, 13, 10, 0))
-        ten_min_dt = stream_dt - timedelta(minutes=10)
-        now = datetime.now(msk)
-        for run_time, task_type in [(morning_dt, 'reminder_morning'), (ten_min_dt, 'reminder_10min')]:
-            if run_time > now:
-                context.job_queue.run_once(send_reminder, when=run_time, data=(user_id, task_type))
-                logger.info(f"Запланировано напоминание {task_type} для пользователя {user_id} на {run_time}")
-
-        logger.info(f"Созданы напоминания для пользователя {user_id}. Дата стрима: {stream_dt}")
-
-    if lang == 'en':
-        text = (
-            "✅ <b>Got it!</b>\n\n"
-            "📅 Wednesday, May 13 at 6:00 PM CET\n\n"
-            "📺 <b>The stream will be live in our Telegram channel</b> — no registration needed!\n\n"
-            "⏰ We'll remind you in the morning and 10 minutes before the start.\n\n"
-            "👇 Subscribe to the channel so you don't miss it:"
-        )
-        keyboard = [[InlineKeyboardButton("📺 t.me/productgames", url="https://t.me/productgames")]]
-    else:
-        text = (
-            "✅ <b>Отлично!</b>\n\n"
-            "📅 Среда, 13 мая в 19:00 МСК / 18:00 CET\n\n"
-            "📺 <b>Вебинар пройдёт в нашем Telegram-канале</b> — регистрации нет!\n\n"
-            "⏰ Напомним утром и за 10 минут до старта.\n\n"
-            "👇 Подписывайтесь на канал, чтобы не пропустить:"
-        )
-        keyboard = [[InlineKeyboardButton("📺 t.me/productgames", url="https://t.me/productgames")]]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(text, parse_mode='HTML', reply_markup=reply_markup)
-
-    # Вопрос об источнике
-    if lang == 'en':
-        question = "And the last question: how did you hear about us?"
-        options = [
-            [InlineKeyboardButton("Kristina Guseva's LinkedIn", callback_data="ref_linkedin_kris")],
-            [InlineKeyboardButton("Inna's LinkedIn", callback_data="ref_linkedin_inna")],
-            [InlineKeyboardButton("Product Games Channel", callback_data="ref_channel")],
-            [InlineKeyboardButton("From friends", callback_data="ref_friends")],
-            [InlineKeyboardButton("Other", callback_data="ref_other")]
-        ]
-    else:
-        question = "И последний вопрос: откуда вы о нас узнали?"
-        options = [
-            [InlineKeyboardButton("LinkedIn Кристины Гусевой", callback_data="ref_linkedin_kris")],
-            [InlineKeyboardButton("LinkedIn Инны", callback_data="ref_linkedin_inna")],
-            [InlineKeyboardButton("Канал Product Games", callback_data="ref_channel")],
-            [InlineKeyboardButton("От знакомых", callback_data="ref_friends")],
-            [InlineKeyboardButton("Другое", callback_data="ref_other")]
-        ]
-    reply_markup = InlineKeyboardMarkup(options)
-    await context.bot.send_message(chat_id=user.id, text=question, reply_markup=reply_markup)
 
 
 
@@ -849,7 +771,6 @@ def main() -> None:
         # Добавляем обработчики callback-запросов
         application.add_handler(CallbackQueryHandler(get_stream_link, pattern="^get_stream_link$"))
         application.add_handler(CallbackQueryHandler(handle_rating, pattern="^rating_"))
-        application.add_handler(CallbackQueryHandler(set_language, pattern="^set_lang_"))
         application.add_handler(CallbackQueryHandler(handle_ref_source, pattern="^ref_"))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_ref_text))
 
